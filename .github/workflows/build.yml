@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev pkg-config gcc
       - name: create frontend dist placeholder
         run: mkdir -p frontend/dist && touch frontend/dist/.gitkeep
-      - run: go vet ./...
+      - run: go vet -tags webkit2_41 ./...
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -41,7 +41,7 @@ jobs:
         run: mkdir -p frontend/dist && touch frontend/dist/.gitkeep
         working-directory: ${{ github.workspace }}
       - name: generate wailsjs
-        run: wails generate module
+        run: wails generate module -tags webkit2_41
         working-directory: ${{ github.workspace }}
       - run: npm ci
       - run: npm run build
@@ -53,7 +53,9 @@ jobs:
         include:
           - os: windows-latest
             artifact-name: mocha-desktop-windows
-            artifact-path: build/bin/mocha-desktop.exe
+            artifact-path: |
+              build/bin/mocha-desktop.exe
+              build/bin/mocha-desktop-amd64-installer.exe
           - os: macos-latest
             artifact-name: mocha-desktop-macos
             artifact-path: build/bin/mocha-desktop.app
@@ -76,7 +78,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev pkg-config gcc
       - name: install wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+      - name: build (linux)
+        if: runner.os == 'Linux'
+        run: wails build -tags webkit2_41
+      - name: build (windows)
+        if: runner.os == 'Windows'
+        run: wails build -nsis
       - name: build
+        if: runner.os != 'Linux' && runner.os != 'Windows'
         run: wails build
       - name: upload artifact
         uses: actions/upload-artifact@v5
