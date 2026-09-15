@@ -1,0 +1,17 @@
+build/bin/
+build/windows/installer/tmp/
+frontend/dist/
+frontend/wailsjs/
+**/node_modules/
+frontend/package.json.md5
+*.exe
+*.test
+*.out
+.DS_Store
+Thumbs.db
+.env
+.env.local
+*.log
+.vscode/
+.idea/
+AGENTS.md

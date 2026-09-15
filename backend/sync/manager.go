@@ -1,0 +1,1184 @@
+package sync
+
+import (
+	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"mocha-desktop/backend/api"
+	"mocha-desktop/backend/transfers"
+)
+
+type FolderState struct {
+	Path       string   `json:"path"`
+	RemotePath string   `json:"remotePath"`
+	Files      int      `json:"files"`
+	Pending    int      `json:"pending"`
+	Status     string   `json:"status"`
+	LastSync   int64    `json:"lastSync"`
+	Error      string   `json:"error,omitempty"`
+	Current    string   `json:"current,omitempty"`
+	Progress   float64  `json:"progress,omitempty"`
+	Queued     []string `json:"queued"`
+	Paused     bool     `json:"paused,omitempty"`
+}
+
+type Manager struct {
+	mu             sync.Mutex
+	roots          map[string]*rootJob
+	emit           func(event string, payload any)
+	client         *api.Client
+	stateDir       string
+	pauseMode      string
+	globalIgnores  []string
+	bidirectional  bool
+	conflictPolicy string
+}
+
+type rootJob struct {
+	path                 string
+	remoteBase           string
+	ctx                  context.Context
+	stateFile            string
+	state                Snapshot
+	queue                []string
+	queued               map[string]bool
+	attempts             map[string]int
+	status               FolderState
+	watcher              *Watcher
+	cancel               context.CancelFunc
+	jobID                string
+	activeJobs           map[string]string
+	activeCancel         map[string]context.CancelFunc
+	lastPush             time.Time
+	pumpMu               sync.Mutex
+	paused               bool
+	ignores              []string
+	folderIgnorePatterns []string
+	opCancel             context.CancelFunc
+	lastRemotePoll       time.Time
+}
+
+func NewManager(stateDir string, emit func(event string, payload any)) *Manager {
+	return &Manager{roots: map[string]*rootJob{}, emit: emit, stateDir: stateDir}
+}
+
+func (m *Manager) SetClient(c *api.Client) {
+	m.mu.Lock()
+	m.client = c
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetPauseMode(mode string) {
+	if mode != "cancel" {
+		mode = "drain"
+	}
+	m.mu.Lock()
+	m.pauseMode = mode
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetGlobalIgnores(patterns []string) {
+	m.mu.Lock()
+	m.globalIgnores = append([]string{}, patterns...)
+	for _, job := range m.roots {
+		job.ignores = mergeIgnores(m.globalIgnores, job.folderIgnorePatterns)
+		if job.watcher != nil {
+			job.watcher.SetIgnores(job.ignores)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetBidirectional(on bool, policy string) {
+	if policy == "" {
+		policy = "skip"
+	}
+	m.mu.Lock()
+	m.bidirectional = on
+	m.conflictPolicy = policy
+	m.mu.Unlock()
+}
+
+func mergeIgnores(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range lists {
+		for _, p := range l {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+func (m *Manager) SetFolderIgnores(path string, patterns []string) {
+	clean := filepath.Clean(path)
+	m.mu.Lock()
+	job, ok := m.roots[clean]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	job.folderIgnorePatterns = append([]string{}, patterns...)
+	job.ignores = mergeIgnores(DefaultIgnores, m.globalIgnores, job.folderIgnorePatterns)
+	if job.watcher != nil {
+		job.watcher.SetIgnores(job.ignores)
+	}
+	for rel := range job.state {
+		if MatchIgnore(rel, job.ignores) {
+			delete(job.state, rel)
+		}
+	}
+	st := job.state
+	file := job.stateFile
+	base := job.remoteBase
+	m.mu.Unlock()
+	SaveSyncState(file, st, base)
+	go m.rescan(clean)
+}
+
+func (m *Manager) SetPaused(path string, paused bool) {
+	clean := filepath.Clean(path)
+	m.mu.Lock()
+	job, ok := m.roots[clean]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	job.paused = paused
+	job.status.Paused = paused
+	if paused {
+		job.status.Status = "paused"
+		if m.pauseMode == "cancel" && job.opCancel != nil {
+			job.opCancel()
+		}
+	} else {
+		if job.status.Status == "paused" {
+			if len(job.queue) > 0 {
+				job.status.Status = "syncing"
+			} else {
+				job.status.Status = "idle"
+			}
+		}
+	}
+	m.mu.Unlock()
+	m.broadcast()
+	if !paused {
+		go m.rescan(clean)
+	}
+}
+
+func (m *Manager) CancelJob(jobID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.roots {
+		if fn, ok := job.activeCancel[jobID]; ok {
+			fn()
+			return true
+		}
+	}
+	return false
+}
+
+func stateName(path string) string {
+	h := sha1.Sum([]byte(path))
+	return "sync-" + hex.EncodeToString(h[:])[:16] + ".json"
+}
+
+func inside(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func (m *Manager) Add(path string) (FolderState, error) {
+	clean := filepath.Clean(path)
+	info, err := os.Stat(clean)
+	if err != nil {
+		return FolderState{}, err
+	}
+	if !info.IsDir() {
+		return FolderState{}, fmt.Errorf("not a folder")
+	}
+	m.mu.Lock()
+	if job, ok := m.roots[clean]; ok {
+		st := job.status
+		m.mu.Unlock()
+		return st, nil
+	}
+	for p := range m.roots {
+		if inside(clean, p) || inside(p, clean) {
+			m.mu.Unlock()
+			return FolderState{}, fmt.Errorf("folder overlaps an existing watched folder")
+		}
+	}
+	stateFile := filepath.Join(m.stateDir, stateName(clean))
+	ignores := mergeIgnores(DefaultIgnores, m.globalIgnores)
+	w, err := NewWithIgnores(clean, ignores)
+	if err != nil {
+		m.mu.Unlock()
+		return FolderState{}, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	snap, base, hasState := LoadSyncState(stateFile)
+	if !hasState || (base != SyncRootSegment && !strings.HasPrefix(base, SyncRootSegment+"/")) {
+		snap = Snapshot{}
+		base = m.uniqueRemoteBase(remoteBaseForFolder(clean, localComputerSegment()))
+	}
+	FilterSnapshot(snap, ignores)
+	job := &rootJob{
+		path:         clean,
+		remoteBase:   base,
+		ctx:          ctx,
+		stateFile:    stateFile,
+		state:        snap,
+		queue:        []string{},
+		queued:       map[string]bool{},
+		attempts:     map[string]int{},
+		status:       FolderState{Path: clean, RemotePath: remotePathForBase(base), Status: "scanning"},
+		watcher:      w,
+		cancel:       cancel,
+		activeJobs:   map[string]string{},
+		activeCancel: map[string]context.CancelFunc{},
+		ignores:      ignores,
+	}
+	m.roots[clean] = job
+	m.mu.Unlock()
+	if err := w.Start(ctx); err != nil {
+		m.mu.Lock()
+		delete(m.roots, clean)
+		m.mu.Unlock()
+		cancel()
+		return FolderState{}, err
+	}
+	go m.serve(job)
+	m.broadcast()
+	return m.get(clean), nil
+}
+
+type RemoveSyncResult struct {
+	Deleted int `json:"deleted"`
+	Skipped int `json:"skipped"`
+	Failed  int `json:"failed"`
+}
+
+type RemovePreviewFile struct {
+	Rel     string `json:"rel"`
+	Name    string `json:"name"`
+	Dir     string `json:"dir"`
+	Size    int64  `json:"size"`
+	Matched bool   `json:"matched"`
+}
+
+type RemoveSyncPreview struct {
+	Files      []RemovePreviewFile `json:"files"`
+	Total      int                 `json:"total"`
+	Matched    int                 `json:"matched"`
+	Unmatched  int                 `json:"unmatched"`
+	Truncated  bool                `json:"truncated"`
+	RemoteBase string              `json:"remoteBase"`
+	RemotePath string              `json:"remotePath"`
+}
+
+type removeTarget struct {
+	id   string
+	rel  string
+	name string
+	dir  string
+	size int64
+}
+
+func collectRemoveTargets(snapshot Snapshot, remoteBase string) []removeTarget {
+	targets := make([]removeTarget, 0, len(snapshot))
+	for rel, st := range snapshot {
+		if st.Size == 0 {
+			continue
+		}
+		targets = append(targets, removeTarget{
+			id:   st.RemoteID,
+			rel:  rel,
+			name: filepath.Base(filepath.FromSlash(rel)),
+			dir:  remoteDirFor(rel, remoteBase),
+			size: st.Size,
+		})
+	}
+	slices.SortFunc(targets, func(a, b removeTarget) int { return strings.Compare(a.rel, b.rel) })
+	return targets
+}
+
+func (m *Manager) snapshotFor(path string) (Snapshot, string, error) {
+	clean := filepath.Clean(path)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.roots[clean]
+	if !ok {
+		return nil, "", fmt.Errorf("folder is not watched")
+	}
+	return maps.Clone(job.state), job.remoteBase, nil
+}
+
+func (m *Manager) PreviewRemove(path string) (RemoveSyncPreview, error) {
+	var preview RemoveSyncPreview
+	preview.Files = []RemovePreviewFile{}
+	snapshot, remoteBase, err := m.snapshotFor(path)
+	if err != nil {
+		return preview, err
+	}
+	preview.RemoteBase = remoteBase
+	preview.RemotePath = remotePathForBase(remoteBase)
+	client := m.client
+	if client == nil || client.APIKey == "" || client.BaseURL == "" {
+		return preview, fmt.Errorf("not connected")
+	}
+	targets := collectRemoveTargets(snapshot, remoteBase)
+	preview.Total = len(targets)
+	resolvedIDs := make([]string, len(targets))
+	sem := make(chan struct{}, 4)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		if t.id != "" {
+			resolvedIDs[i] = t.id
+			continue
+		}
+		wg.Add(1)
+		go func(i int, t removeTarget) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			id, err := m.findRemoteID(client, t.dir, t.name, t.size)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			resolvedIDs[i] = id
+			mu.Unlock()
+		}(i, t)
+	}
+	wg.Wait()
+	const maxPreviewFiles = 100
+	for i, t := range targets {
+		matched := resolvedIDs[i] != ""
+		if matched {
+			preview.Matched++
+		} else {
+			preview.Unmatched++
+		}
+		if len(preview.Files) < maxPreviewFiles {
+			preview.Files = append(preview.Files, RemovePreviewFile{
+				Rel:     filepath.ToSlash(t.rel),
+				Name:    t.name,
+				Dir:     t.dir,
+				Size:    t.size,
+				Matched: matched,
+			})
+		} else {
+			preview.Truncated = true
+		}
+	}
+	return preview, nil
+}
+
+func (m *Manager) Remove(path string) {
+	_, _ = m.RemoveWithOptions(path, false)
+}
+
+func (m *Manager) RemoveWithOptions(path string, deleteRemote bool) (RemoveSyncResult, error) {
+	var result RemoveSyncResult
+	clean := filepath.Clean(path)
+	m.mu.Lock()
+	job, ok := m.roots[clean]
+	m.mu.Unlock()
+	if !ok {
+		return result, fmt.Errorf("folder is not watched")
+	}
+	job.cancel()
+	if job.opCancel != nil {
+		job.opCancel()
+	}
+
+	var cancelled []transfers.Progress
+	var snapshot Snapshot
+	var remoteBase string
+	var stateFile string
+	m.mu.Lock()
+	if j, exists := m.roots[clean]; exists {
+		snapshot = maps.Clone(j.state)
+		remoteBase = j.remoteBase
+		stateFile = j.stateFile
+		for id, name := range j.activeJobs {
+			cancelled = append(cancelled, transfers.Progress{JobID: id, FileName: name, Status: "cancelled"})
+			if fn, ok := j.activeCancel[id]; ok {
+				fn()
+			}
+		}
+		if len(cancelled) == 0 && j.jobID != "" {
+			cancelled = append(cancelled, transfers.Progress{JobID: j.jobID, FileName: j.status.Current, Status: "cancelled"})
+		}
+		delete(m.roots, clean)
+	}
+	m.mu.Unlock()
+
+	if deleteRemote {
+		client := m.client
+		if client == nil || client.APIKey == "" || client.BaseURL == "" {
+			job.watcher.Stop()
+			if m.emit != nil {
+				for _, p := range cancelled {
+					m.emit("upload:progress", p)
+				}
+			}
+			m.broadcast()
+			return result, fmt.Errorf("not connected")
+		}
+		result = m.deleteRemoteCopies(client, snapshot, remoteBase)
+	}
+	job.watcher.Stop()
+	if deleteRemote && stateFile != "" {
+		_ = os.Remove(stateFile)
+	}
+	if m.emit != nil {
+		for _, p := range cancelled {
+			m.emit("upload:progress", p)
+		}
+	}
+	m.broadcast()
+	return result, nil
+}
+
+func (m *Manager) deleteRemoteCopies(client *api.Client, snapshot Snapshot, remoteBase string) RemoveSyncResult {
+	var result RemoveSyncResult
+	targets := collectRemoveTargets(snapshot, remoteBase)
+
+	sem := make(chan struct{}, 4)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t removeTarget) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			id := t.id
+			if id == "" {
+				var err error
+				id, err = m.findRemoteID(client, t.dir, t.name, t.size)
+				if err != nil || id == "" {
+					mu.Lock()
+					result.Skipped++
+					mu.Unlock()
+					return
+				}
+			}
+			if err := client.DeleteFile(id); err != nil {
+				mu.Lock()
+				result.Failed++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			result.Deleted++
+			mu.Unlock()
+		}(t)
+	}
+	wg.Wait()
+	return result
+}
+
+func (m *Manager) findRemoteID(client *api.Client, dir, name string, size int64) (string, error) {
+	cursor := ""
+	for pages := 0; pages < 5; pages++ {
+		list, err := client.ListFiles(dir, 100, cursor, name)
+		if err != nil {
+			return "", err
+		}
+		for _, f := range list.Files {
+			if f.OriginalName == name && f.Size == size && f.Path == dir {
+				return f.ID, nil
+			}
+		}
+		if !list.HasMore || list.NextCursor == nil || *list.NextCursor == "" {
+			break
+		}
+		cursor = *list.NextCursor
+	}
+	return "", nil
+}
+
+func (m *Manager) List() []FolderState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]FolderState, 0, len(m.roots))
+	for _, job := range m.roots {
+		st := job.status
+		preview := make([]string, 0, len(job.queue))
+		for i, rel := range job.queue {
+			if i >= 20 {
+				break
+			}
+			preview = append(preview, filepath.ToSlash(rel))
+		}
+		st.Queued = preview
+		st.Pending = len(job.queue)
+		out = append(out, st)
+	}
+	slices.SortFunc(out, func(a, b FolderState) int { return strings.Compare(a.Path, b.Path) })
+	return out
+}
+
+func (m *Manager) get(path string) FolderState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job, ok := m.roots[path]; ok {
+		return job.status
+	}
+	return FolderState{Path: path, Status: "idle"}
+}
+
+func (m *Manager) broadcast() {
+	if m.emit == nil {
+		return
+	}
+	m.emit("sync:status", m.List())
+}
+
+func (m *Manager) update(path string, fn func(*FolderState)) {
+	m.mu.Lock()
+	if job, ok := m.roots[path]; ok {
+		fn(&job.status)
+	}
+	m.mu.Unlock()
+	m.broadcast()
+}
+
+func (m *Manager) enqueue(path, rel string) {
+	m.mu.Lock()
+	job, ok := m.roots[path]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	if MatchIgnore(rel, job.ignores) {
+		m.mu.Unlock()
+		return
+	}
+	if !job.queued[rel] {
+		job.queued[rel] = true
+		job.queue = append(job.queue, rel)
+		job.status.Pending = len(job.queue)
+		if job.status.Status == "idle" {
+			job.status.Status = "syncing"
+		}
+	}
+	m.mu.Unlock()
+	m.broadcast()
+}
+
+func (m *Manager) RescanAll() {
+	m.mu.Lock()
+	paths := make([]string, 0, len(m.roots))
+	for p := range m.roots {
+		paths = append(paths, p)
+	}
+	m.mu.Unlock()
+	for _, p := range paths {
+		go m.rescan(p)
+	}
+}
+
+func (m *Manager) rescan(path string) {
+	m.update(path, func(s *FolderState) {
+		if s.Status == "idle" {
+			s.Status = "scanning"
+		}
+		s.Error = ""
+	})
+	m.scanAndEnqueue(path)
+}
+
+func (m *Manager) scanAndEnqueue(path string) {
+	m.mu.Lock()
+	job, ok := m.roots[path]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	ignores := append([]string{}, job.ignores...)
+	m.mu.Unlock()
+	snap, err := ScanWithIgnores(path, ignores)
+	if err != nil {
+		m.update(path, func(s *FolderState) { s.Status = "error"; s.Error = err.Error() })
+		return
+	}
+	m.mu.Lock()
+	job, ok = m.roots[path]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	job.status.Files = len(snap)
+	old := job.state
+	m.mu.Unlock()
+	added, modified := Diff(old, snap)
+	for _, rel := range append(added, modified...) {
+		m.enqueue(path, rel)
+	}
+	m.update(path, func(s *FolderState) {
+		if s.Paused {
+			s.Status = "paused"
+			return
+		}
+		if s.Pending > 0 {
+			s.Status = "syncing"
+		} else if s.Status == "scanning" {
+			s.Status = "idle"
+		}
+	})
+}
+
+func (m *Manager) serve(job *rootJob) {
+	m.update(job.path, func(s *FolderState) { s.Status = "scanning"; s.Error = "" })
+	m.scanAndEnqueue(job.path)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	remoteTicker := time.NewTicker(45 * time.Second)
+	defer ticker.Stop()
+	defer remoteTicker.Stop()
+	for {
+		select {
+		case <-job.ctx.Done():
+			return
+		case ev, ok := <-job.watcher.Events():
+			if !ok {
+				return
+			}
+			m.handleEvent(job, ev)
+		case <-ticker.C:
+			go m.pump(job)
+		case <-remoteTicker.C:
+			go m.maybePullRemote(job)
+		}
+	}
+}
+
+func (m *Manager) handleEvent(job *rootJob, ev Event) {
+	if MatchIgnore(ev.Path, job.ignores) {
+		return
+	}
+	if ev.Type == "deleted" {
+		m.mu.Lock()
+		delete(job.state, ev.Path)
+		st := job.state
+		file := job.stateFile
+		base := job.remoteBase
+		m.mu.Unlock()
+		SaveSyncState(file, st, base)
+		return
+	}
+	local := filepath.Join(job.path, filepath.FromSlash(ev.Path))
+	info, err := os.Stat(local)
+	if err != nil || info.IsDir() {
+		return
+	}
+	m.mu.Lock()
+	if st, ok := job.state[ev.Path]; ok && st.Size == info.Size() && st.ModTime == info.ModTime().UnixNano() {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	m.enqueue(job.path, ev.Path)
+}
+
+func (m *Manager) maybePullRemote(job *rootJob) {
+	m.mu.Lock()
+	_, ok := m.roots[job.path]
+	bi := m.bidirectional
+	policy := m.conflictPolicy
+	client := m.client
+	m.mu.Unlock()
+	if !ok || !bi || client == nil || client.APIKey == "" || client.BaseURL == "" {
+		return
+	}
+	m.mu.Lock()
+	paused := job.paused
+	last := job.lastRemotePoll
+	m.mu.Unlock()
+	if paused || time.Since(last) < 30*time.Second {
+		return
+	}
+	if err := m.pullRemote(job, client, policy); err != nil {
+		return
+	}
+	m.mu.Lock()
+	if j, exists := m.roots[job.path]; exists {
+		j.lastRemotePoll = time.Now()
+	}
+	m.mu.Unlock()
+}
+
+type remoteFile struct {
+	id   string
+	size int64
+}
+
+func (m *Manager) listRemoteTree(client *api.Client, base string) (map[string]remoteFile, error) {
+	out := map[string]remoteFile{}
+	root := remotePathForBase(base)
+	queue := []string{root}
+	seen := map[string]bool{root: true}
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		cursor := ""
+		for {
+			list, err := client.ListFiles(dir, 500, cursor, "")
+			if err != nil {
+				return out, err
+			}
+			for _, f := range list.Files {
+				name := f.OriginalName
+				if name == "" {
+					name = f.FileName
+				}
+				fdir := f.Path
+				if fdir == "" {
+					fdir = dir
+				}
+				if !strings.HasSuffix(fdir, "/") {
+					fdir += "/"
+				}
+				rel := strings.TrimPrefix(fdir+name, root)
+				rel = strings.TrimPrefix(rel, "/")
+				if rel == "" {
+					continue
+				}
+				if _, exists := out[rel]; !exists {
+					out[rel] = remoteFile{id: f.ID, size: f.Size}
+				}
+			}
+			for _, fo := range list.Folders {
+				sub := strings.Trim(fo, "/")
+				if sub == "" {
+					continue
+				}
+				next := dir + sub + "/"
+				if !seen[next] {
+					seen[next] = true
+					queue = append(queue, next)
+				}
+			}
+			if !list.HasMore || list.NextCursor == nil || *list.NextCursor == "" {
+				break
+			}
+			cursor = *list.NextCursor
+		}
+	}
+	return out, nil
+}
+
+func (m *Manager) pullRemote(job *rootJob, client *api.Client, policy string) error {
+	remote, err := m.listRemoteTree(client, job.remoteBase)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	state := maps.Clone(job.state)
+	ignores := append([]string{}, job.ignores...)
+	m.mu.Unlock()
+	for rel, rf := range remote {
+		if rf.size == 0 || MatchIgnore(rel, ignores) {
+			continue
+		}
+		if st, ok := state[rel]; ok && st.Size == rf.size {
+			continue
+		}
+		local := filepath.Join(job.path, filepath.FromSlash(rel))
+		needsDownload := false
+		if info, err := os.Stat(local); err != nil {
+			needsDownload = true
+		} else if info.IsDir() {
+			continue
+		} else if info.Size() != rf.size {
+			if policy == "skip" {
+				continue
+			}
+			needsDownload = true
+		}
+		if !needsDownload {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+			continue
+		}
+		jobID := transfers.NewJobID("sync-dl-")
+		fileCtx, cancel := context.WithCancel(job.ctx)
+		m.mu.Lock()
+		if j, exists := m.roots[job.path]; exists {
+			if j.activeCancel == nil {
+				j.activeCancel = map[string]context.CancelFunc{}
+			}
+			j.activeCancel[jobID] = cancel
+		}
+		m.mu.Unlock()
+		derr := transfers.DownloadFileWithID(fileCtx, client, rf.id, local, "attachment", jobID, m.emit)
+		cancel()
+		m.mu.Lock()
+		if j, exists := m.roots[job.path]; exists {
+			delete(j.activeCancel, jobID)
+		}
+		m.mu.Unlock()
+		if derr != nil {
+			continue
+		}
+		if info, err := os.Stat(local); err == nil && !info.IsDir() {
+			m.mu.Lock()
+			if j, exists := m.roots[job.path]; exists {
+				prev := j.state[rel]
+				if prev.RemoteID == "" {
+					prev.RemoteID = rf.id
+				}
+				prev.Size = info.Size()
+				prev.ModTime = info.ModTime().UnixNano()
+				j.state[rel] = prev
+				SaveSyncState(j.stateFile, j.state, j.remoteBase)
+				j.status.LastSync = time.Now().Unix()
+			}
+			m.mu.Unlock()
+		}
+	}
+	m.broadcast()
+	return nil
+}
+
+func remoteDirFor(rel, remoteBase string) string {
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	parts := make([]string, 0, 2)
+	if remoteBase != "" {
+		parts = append(parts, remoteBase)
+	}
+	if dir != "." && dir != "/" && dir != "" {
+		parts = append(parts, strings.Trim(dir, "/"))
+	}
+	if len(parts) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(parts, "/") + "/"
+}
+
+func remotePathForBase(remoteBase string) string {
+	if remoteBase == "" {
+		return "/"
+	}
+	return "/" + remoteBase + "/"
+}
+
+const SyncRootSegment = "Computers"
+
+const maxComputerSegmentLen = 60
+const maxFolderSegmentLen = 80
+
+func sanitizePathSegment(value string, maxLen int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > maxLen {
+		runes = runes[:maxLen]
+	}
+	cleaned := strings.Trim(strings.Trim(string(runes), "."), " ")
+	for _, r := range []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"} {
+		cleaned = strings.ReplaceAll(cleaned, r, "-")
+	}
+	var b strings.Builder
+	for _, r := range cleaned {
+		if r < 32 || r == 127 {
+			b.WriteString("-")
+			continue
+		}
+		b.WriteRune(r)
+	}
+	cleaned = strings.Trim(strings.Trim(b.String(), "."), " ")
+	return strings.TrimSpace(cleaned)
+}
+
+func localComputerSegment() string {
+	host, err := os.Hostname()
+	if err != nil {
+		host = ""
+	}
+	seg := sanitizePathSegment(host, maxComputerSegmentLen)
+	if seg == "" || seg == "." || seg == ".." {
+		return "unknown"
+	}
+	return seg
+}
+
+func remoteBaseForFolder(localPath, computer string) string {
+	base := sanitizePathSegment(filepath.Base(localPath), maxFolderSegmentLen)
+	if base == "" || base == "." || base == ".." {
+		base = "Sync"
+	}
+	comp := sanitizePathSegment(computer, maxComputerSegmentLen)
+	if comp == "" || comp == "." || comp == ".." {
+		comp = "unknown"
+	}
+	return SyncRootSegment + "/" + comp + "/" + base
+}
+
+func (m *Manager) uniqueRemoteBase(desired string) string {
+	candidate := desired
+	for i := 2; ; i++ {
+		taken := false
+		for _, job := range m.roots {
+			if job.remoteBase == candidate {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", desired, i)
+	}
+}
+
+func (m *Manager) pump(job *rootJob) {
+	if !job.pumpMu.TryLock() {
+		return
+	}
+	defer job.pumpMu.Unlock()
+	m.mu.Lock()
+	if m.client == nil || m.client.APIKey == "" || m.client.BaseURL == "" {
+		m.mu.Unlock()
+		return
+	}
+	if job.paused {
+		if job.status.Status != "paused" {
+			job.status.Status = "paused"
+			m.mu.Unlock()
+			m.broadcast()
+			return
+		}
+		m.mu.Unlock()
+		return
+	}
+	if job.ctx.Err() != nil {
+		m.mu.Unlock()
+		return
+	}
+	opCtx, opCancel := context.WithCancel(job.ctx)
+	job.opCancel = opCancel
+	defer func() {
+		opCancel()
+		m.mu.Lock()
+		if j, exists := m.roots[job.path]; exists {
+			j.opCancel = nil
+		}
+		m.mu.Unlock()
+	}()
+	if len(job.queue) == 0 {
+		if job.status.Status == "syncing" {
+			job.status.Status = "idle"
+			job.status.Current = ""
+			m.mu.Unlock()
+			m.broadcast()
+			return
+		}
+		m.mu.Unlock()
+		return
+	}
+	batchSize := transfers.DefaultFileConcurrency
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	if len(job.queue) < batchSize {
+		batchSize = len(job.queue)
+	}
+	rels := make([]string, batchSize)
+	copy(rels, job.queue[:batchSize])
+	job.queue = job.queue[batchSize:]
+	for _, rel := range rels {
+		delete(job.queued, rel)
+	}
+	job.status.Status = "syncing"
+	if len(rels) == 1 {
+		job.status.Current = filepath.Base(rels[0])
+	} else {
+		job.status.Current = fmt.Sprintf("%d files", len(rels))
+	}
+	job.status.Progress = 0
+	job.status.Pending = len(job.queue)
+	client := m.client
+	m.mu.Unlock()
+	m.broadcast()
+
+	type outcome struct {
+		rel     string
+		missing bool
+		isDir   bool
+		empty   bool
+		modTime int64
+		fileID  string
+		err     error
+	}
+	outcomes := make([]outcome, len(rels))
+	var progMu sync.Mutex
+	prog := make(map[string]float64, len(rels))
+
+	var wg sync.WaitGroup
+	for i, rel := range rels {
+		wg.Add(1)
+		go func(i int, rel string) {
+			defer wg.Done()
+			local := filepath.Join(job.path, filepath.FromSlash(rel))
+			info, err := os.Stat(local)
+			if err != nil {
+				outcomes[i] = outcome{rel: rel, missing: true}
+				return
+			}
+			if info.IsDir() {
+				outcomes[i] = outcome{rel: rel, isDir: true}
+				return
+			}
+			if info.Size() == 0 {
+				outcomes[i] = outcome{rel: rel, empty: true, modTime: info.ModTime().UnixNano()}
+				return
+			}
+			jobID := transfers.NewJobID("sync-")
+			fileCtx, fileCancel := context.WithCancel(opCtx)
+			m.mu.Lock()
+			if j, exists := m.roots[job.path]; exists {
+				if j.activeJobs == nil {
+					j.activeJobs = map[string]string{}
+				}
+				if j.activeCancel == nil {
+					j.activeCancel = map[string]context.CancelFunc{}
+				}
+				j.activeJobs[jobID] = filepath.Base(rel)
+				j.activeCancel[jobID] = fileCancel
+				j.jobID = jobID
+			} else {
+				fileCancel()
+			}
+			m.mu.Unlock()
+			wrapped := func(event string, payload any) {
+				push := false
+				if event == "upload:progress" {
+					if p, ok := payload.(transfers.Progress); ok {
+						progMu.Lock()
+						prog[jobID] = p.Percent
+						var sum float64
+						for _, v := range prog {
+							sum += v
+						}
+						avg := sum / float64(len(rels))
+						progMu.Unlock()
+						m.mu.Lock()
+						if j, exists := m.roots[job.path]; exists {
+							j.status.Progress = avg
+							if p.Status == "done" || p.Status == "error" || time.Since(j.lastPush) > 300*time.Millisecond {
+								j.lastPush = time.Now()
+								push = true
+							}
+						}
+						m.mu.Unlock()
+					}
+				}
+				if m.emit != nil {
+					m.emit(event, payload)
+				}
+				if push {
+					m.broadcast()
+				}
+			}
+			fileID, uerr := transfers.UploadFileWithID(fileCtx, client, local, remoteDirFor(rel, job.remoteBase), jobID, wrapped)
+			fileCancel()
+			m.mu.Lock()
+			if j, exists := m.roots[job.path]; exists {
+				delete(j.activeJobs, jobID)
+				delete(j.activeCancel, jobID)
+				j.jobID = ""
+			}
+			m.mu.Unlock()
+			outcomes[i] = outcome{rel: rel, fileID: fileID, err: uerr}
+		}(i, rel)
+	}
+	wg.Wait()
+
+	m.mu.Lock()
+	j, ok := m.roots[job.path]
+	if !ok {
+		m.mu.Unlock()
+		m.broadcast()
+		return
+	}
+	dirty := false
+	for _, o := range outcomes {
+		switch {
+		case o.missing:
+			if _, exists := j.state[o.rel]; exists {
+				delete(j.state, o.rel)
+				dirty = true
+			}
+		case o.isDir:
+		case o.empty:
+			j.state[o.rel] = FileState{Size: 0, ModTime: o.modTime}
+			dirty = true
+		case o.err != nil:
+			if opCtx.Err() != nil || job.ctx.Err() != nil {
+				if !j.queued[o.rel] {
+					j.queued[o.rel] = true
+					j.queue = append(j.queue, o.rel)
+				}
+				continue
+			}
+			j.attempts[o.rel]++
+			if j.attempts[o.rel] >= 3 {
+				delete(j.attempts, o.rel)
+				j.status.Error = filepath.Base(o.rel) + ": " + o.err.Error()
+			} else if !j.queued[o.rel] {
+				j.queued[o.rel] = true
+				j.queue = append(j.queue, o.rel)
+			}
+		default:
+			delete(j.attempts, o.rel)
+			if fi, serr := os.Stat(filepath.Join(job.path, filepath.FromSlash(o.rel))); serr == nil && !fi.IsDir() {
+				st := FileState{Size: fi.Size(), ModTime: fi.ModTime().UnixNano()}
+				if prev, exists := j.state[o.rel]; exists {
+					st.RemoteID = prev.RemoteID
+				}
+				if o.fileID != "" {
+					st.RemoteID = o.fileID
+				}
+				j.state[o.rel] = st
+				dirty = true
+			}
+			j.status.LastSync = time.Now().Unix()
+			j.status.Error = ""
+		}
+	}
+	if dirty {
+		SaveSyncState(j.stateFile, j.state, j.remoteBase)
+	}
+	if j.paused {
+		j.status.Status = "paused"
+	} else if len(j.queue) == 0 {
+		j.status.Status = "idle"
+		j.status.Current = ""
+		j.status.Progress = 0
+	} else {
+		j.status.Status = "syncing"
+	}
+	j.status.Pending = len(j.queue)
+	m.mu.Unlock()
+	m.broadcast()
+}
