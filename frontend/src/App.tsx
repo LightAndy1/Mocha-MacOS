@@ -10,6 +10,8 @@ import { SettingRow } from "./Toggle";
 import { TransferRow } from "./components/TransferPanel";
 import { ArrowIcon, FolderGlyph } from "./components/icons";
 import { FilesTab } from "./components/FilesTab";
+import { ModalShell } from "./components/ModalShell";
+import { ShareModal } from "./components/ShareModal";
 
 type Tab = "files" | "shares" | "sync" | "activity" | "trash" | "settings";
 
@@ -52,6 +54,7 @@ export default function App() {
   const [modalValue, setModalValue] = useState("");
   const [modalBusy, setModalBusy] = useState(false);
   const [archiveFile, setArchiveFile] = useState<FileItem | null>(null);
+  const [shareFile, setShareFile] = useState<FileItem | null>(null);
   const [archiveEntries, setArchiveEntries] = useState<ArchiveEntry[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [overwrite, setOverwrite] = useState<{ file: FileItem; dest: string; size: number } | null>(null);
@@ -68,6 +71,8 @@ export default function App() {
   const [previewUrlLoading, setPreviewUrlLoading] = useState(false);
   const [previewUrlError, setPreviewUrlError] = useState<string | null>(null);
   const previewReq = useRef(0);
+  const filesReq = useRef(0);
+  const lastPathRef = useRef<string | null>(null);
 
   const [filesView, setFilesView] = useState<"list" | "grid">("list");
 
@@ -113,50 +118,65 @@ export default function App() {
   }, []);
 
   const refreshData = useCallback(async () => {
+    const req = ++filesReq.current;
+    const navigating = lastPathRef.current !== path;
+    lastPathRef.current = path;
     setFilesLoading(true);
     setFilesError(null);
     setCursor("");
     setHasMore(false);
+    setLoadingMore(false);
     setSelectedIds(new Set());
+    if (navigating) {
+      setFiles([]);
+      setFolders([]);
+    }
     try {
       const [p, st, sh] = await Promise.all([
         api.profile().catch(() => null),
         api.storage().catch(() => null),
         api.shares().catch(() => [] as Share[]),
       ]);
+      if (filesReq.current !== req) return;
       if (p) setProfile(p);
       if (st) setStorage(st);
       setShares(sh || []);
       try {
         const list = await api.list(path, 100, "", query);
+        if (filesReq.current !== req) return;
         setFiles(list.files || []);
         setFolders(list.folders || []);
         setCursor(list.nextCursor || "");
         setHasMore(!!list.hasMore);
       } catch (err) {
+        if (filesReq.current !== req) return;
         const msg = err instanceof Error ? err.message : "File listing failed";
         setFilesError(msg);
         setNotice(msg);
       }
     } catch (e) {
+      if (filesReq.current !== req) return;
       setNotice(e instanceof Error ? e.message : "Refresh failed");
     } finally {
-      setFilesLoading(false);
+      if (filesReq.current === req) setFilesLoading(false);
     }
   }, [path, query]);
 
   const loadMore = useCallback(async () => {
     if (!hasMore || loadingMore) return;
+    const req = filesReq.current;
     setLoadingMore(true);
     try {
       const list = await api.list(path, 100, cursor, query);
+      if (filesReq.current !== req) return;
       setFiles((f) => [...f, ...(list.files || [])]);
       setCursor(list.nextCursor || "");
       setHasMore(!!list.hasMore);
     } catch (err) {
+      if (filesReq.current !== req) return;
       setNotice(err instanceof Error ? err.message : "Load more failed");
     } finally {
-      setLoadingMore(false);
+      if (filesReq.current === req) setLoadingMore(false);
     }
   }, [hasMore, loadingMore, path, cursor, query]);
 
@@ -296,15 +316,9 @@ export default function App() {
     }
   }
 
-  async function share(id: string) {
-    try {
-      await api.createShare(id);
-      const sh = await api.shares();
-      setShares(sh);
-      setNotice("Share link created");
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : "Share failed");
-    }
+  function share(id: string) {
+    const f = files.find((x) => x.id === id);
+    if (f) setShareFile(f);
   }
 
   const previewableFiles = useMemo(() => files.filter((f) => isPreviewable(f)), [files]);
@@ -366,7 +380,7 @@ export default function App() {
     }
   }
 
-  async function confirmOverwrite() {
+  async function confirmOverwrite(close: () => void) {
     if (!overwrite) return;
     try {
       await api.downloadToPath(overwrite.file.id, overwrite.dest, true);
@@ -374,7 +388,7 @@ export default function App() {
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Download failed");
     } finally {
-      setOverwrite(null);
+      close();
     }
   }
 
@@ -387,7 +401,7 @@ export default function App() {
     }
   }
 
-  async function submitModal() {
+  async function submitModal(close: () => void) {
     if (!modal || modalBusy) return;
     const value = modalValue.trim();
     if (!value) {
@@ -401,8 +415,7 @@ export default function App() {
       else if (modal.kind === "renameFolder") await api.renameFolder(path, modal.name, value);
       else if (modal.kind === "moveFile") await api.moveFile(modal.file.id, value);
       else if (modal.kind === "moveFolder") await api.moveFolder(path + modal.name.replace(/^\//, ""), value);
-      setModal(null);
-      setModalValue("");
+      close();
       await refreshData();
     } catch (err) {
       setNotice(err instanceof Error ? err.message : "Operation failed");
@@ -474,13 +487,13 @@ export default function App() {
     }
   }
 
-  async function saveIgnoreEditor() {
+  async function saveIgnoreEditor(close: () => void) {
     if (!ignoreEditor || ignoreBusy) return;
     setIgnoreBusy(true);
     try {
       const patterns = parseLines(ignoreDraft);
       await api.saveFolderIgnores(ignoreEditor, patterns);
-      setIgnoreEditor(null);
+      close();
       setNotice("Ignore rules saved");
     } catch (err) {
       setNotice(err instanceof Error ? err.message : "Save failed");
@@ -1044,28 +1057,37 @@ export default function App() {
       </main>
 
       {modal && (
-        <div role="dialog" aria-modal="true" className="overlay-fade fixed inset-0 z-30 flex items-center justify-center bg-black/70 px-4 backdrop-blur-md" onMouseDown={(e) => { if (e.target === e.currentTarget) { setModal(null); setModalValue(""); } }}>
-          <div key={modal.kind} className="bezel-shell modal-pop w-full max-w-sm">
+        <ModalShell shellClassName="w-full max-w-sm" onClose={() => { setModal(null); setModalValue(""); }}>
+          {(close) => (
             <div className="bezel-core space-y-3 p-4">
               <div className="font-serif text-lg italic">{modal.kind === "mkdir" ? "New folder" : modal.kind === "renameFile" ? "Rename file" : modal.kind === "renameFolder" ? "Rename folder" : modal.kind.startsWith("move") ? "Move to path" : "Rename"}</div>
               {(modal.kind === "moveFile" || modal.kind === "moveFolder") && <p className="font-mono text-[11px] text-mocha-muted">Destination folder path, e.g. /photos/</p>}
-              <input value={modalValue} onChange={(e) => setModalValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void submitModal(); if (e.key === "Escape") setModal(null); }} autoFocus placeholder={modal.kind === "mkdir" ? "Folder name" : "Name"} className="field w-full rounded-2xl px-4 py-3 text-sm" />
+              <input value={modalValue} onChange={(e) => setModalValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void submitModal(close); }} autoFocus placeholder={modal.kind === "mkdir" ? "Folder name" : "Name"} className="field w-full rounded-2xl px-4 py-3 text-sm" />
               <div className="flex gap-2">
-                <button onClick={() => void submitModal()} disabled={modalBusy} className="glass-button btn-gold flex-1 rounded-full py-2 text-sm font-semibold disabled:opacity-60">{modalBusy ? "Saving" : "Confirm"}</button>
-                <button onClick={() => { setModal(null); setModalValue(""); }} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
+                <button onClick={() => void submitModal(close)} disabled={modalBusy} className="glass-button btn-gold flex-1 rounded-full py-2 text-sm font-semibold disabled:opacity-60">{modalBusy ? "Saving" : "Confirm"}</button>
+                <button onClick={close} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </ModalShell>
+      )}
+
+      {shareFile && (
+        <ShareModal
+          file={shareFile}
+          appUrl={appUrl}
+          onClose={() => setShareFile(null)}
+          onCreated={() => { void api.shares().then((sh) => setShares(sh)).catch(() => undefined); }}
+        />
       )}
 
       {archiveFile && (
-        <div role="dialog" aria-modal="true" aria-label={`Browse ${archiveFile.original_name}`} className="overlay-fade fixed inset-0 z-30 flex items-center justify-center bg-black/70 px-4 backdrop-blur-md" onMouseDown={(e) => { if (e.target === e.currentTarget) setArchiveFile(null); }}>
-          <div key={archiveFile.id} className="bezel-shell modal-pop w-full max-w-lg">
+        <ModalShell label={`Browse ${archiveFile.original_name}`} shellClassName="w-full max-w-lg" onClose={() => setArchiveFile(null)}>
+          {(close) => (
             <div className="bezel-core flex max-h-[70dvh] flex-col p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="truncate font-serif text-lg italic">{archiveFile.original_name}</div>
-                <button onClick={() => setArchiveFile(null)} className="glass-button btn-ghost rounded-full px-3 py-1.5 text-xs">Close</button>
+                <button onClick={close} className="glass-button btn-ghost rounded-full px-3 py-1.5 text-xs">Close</button>
               </div>
               <div className="quiet-scroll mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto">
                 {archiveLoading && <div className="py-6 text-center font-mono text-xs tracking-widest text-mocha-muted">LOADING ARCHIVE</div>}
@@ -1085,39 +1107,39 @@ export default function App() {
                 )}
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </ModalShell>
       )}
 
       {overwrite && (
-        <div role="dialog" aria-modal="true" className="overlay-fade fixed inset-0 z-30 flex items-center justify-center bg-black/70 px-4 backdrop-blur-md" onMouseDown={(e) => { if (e.target === e.currentTarget) setOverwrite(null); }}>
-          <div className="bezel-shell modal-pop w-full max-w-sm">
+        <ModalShell shellClassName="w-full max-w-sm" onClose={() => setOverwrite(null)}>
+          {(close) => (
             <div className="bezel-core space-y-3 p-4">
               <div className="font-serif text-lg italic">File already exists</div>
               <p className="break-all font-mono text-[11px] text-mocha-muted">{overwrite.dest}</p>
               <div className="flex gap-2">
-                <button onClick={() => void confirmOverwrite()} className="glass-button rounded-full border border-red-400/20 bg-red-400/10 flex-1 py-2 text-sm text-red-200">Overwrite</button>
-                <button onClick={() => setOverwrite(null)} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
+                <button onClick={() => void confirmOverwrite(close)} className="glass-button rounded-full border border-red-400/20 bg-red-400/10 flex-1 py-2 text-sm text-red-200">Overwrite</button>
+                <button onClick={close} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </ModalShell>
       )}
 
       {ignoreEditor && (
-        <div role="dialog" aria-modal="true" className="overlay-fade fixed inset-0 z-30 flex items-center justify-center bg-black/70 px-4 backdrop-blur-md" onMouseDown={(e) => { if (e.target === e.currentTarget) setIgnoreEditor(null); }}>
-          <div className="bezel-shell modal-pop w-full max-w-sm">
+        <ModalShell shellClassName="w-full max-w-sm" onClose={() => setIgnoreEditor(null)}>
+          {(close) => (
             <div className="bezel-core space-y-3 p-4">
               <div className="font-serif text-lg italic">Ignore rules</div>
               <p className="break-all font-mono text-[11px] text-mocha-muted">{ignoreEditor}</p>
               <textarea value={ignoreDraft} onChange={(e) => setIgnoreDraft(e.target.value)} rows={5} placeholder={"*.log\nbuild/"} className="field w-full rounded-2xl px-4 py-3 font-mono text-xs" />
               <div className="flex gap-2">
-                <button onClick={() => void saveIgnoreEditor()} disabled={ignoreBusy} className="glass-button btn-gold flex-1 rounded-full py-2 text-sm font-semibold disabled:opacity-60">{ignoreBusy ? "Saving" : "Save"}</button>
-                <button onClick={() => setIgnoreEditor(null)} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
+                <button onClick={() => void saveIgnoreEditor(close)} disabled={ignoreBusy} className="glass-button btn-gold flex-1 rounded-full py-2 text-sm font-semibold disabled:opacity-60">{ignoreBusy ? "Saving" : "Save"}</button>
+                <button onClick={close} className="glass-button btn-ghost rounded-full px-4 py-2 text-sm">Cancel</button>
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </ModalShell>
       )}
 
       {previewFile && (

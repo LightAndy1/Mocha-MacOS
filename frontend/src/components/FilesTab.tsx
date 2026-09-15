@@ -32,7 +32,7 @@ export function FilesTab({ crumbs, onNavigate, filesView, folders, onRenameFolde
       <div className="bezel-shell reveal-fade flex min-h-0 flex-col md:col-span-8">
         <div className="bezel-core flex min-h-0 flex-1 flex-col p-2">
           {folders.length > 0 && (
-            <div className="flex shrink-0 flex-wrap gap-2 p-4">
+            <div className="folder-enter flex shrink-0 flex-wrap gap-2 p-4">
               {folders.map((f) => (
                 <div key={f} className="group/folder flex items-center gap-1 rounded-full border border-white/10 bg-white/5 pl-4 pr-1 py-1">
                   <button onClick={() => onNavigate(f.replace(/^\//, ""))} className="font-mono text-xs text-mocha-secondary hover:text-mocha-goldbright">
@@ -45,12 +45,16 @@ export function FilesTab({ crumbs, onNavigate, filesView, folders, onRenameFolde
             </div>
           )}
           <div className="files-scroll flex min-h-0 flex-1 flex-col p-1.5">
-            {filesView === "grid" ? (
-              <FileGrid files={files} selectedIds={selectedIds} onToggleSelect={onToggleSelect} actions={actions} />
+            {filesLoading && files.length === 0 ? (
+              <div className="flex flex-1 items-center justify-center px-6 py-10 text-center font-mono text-xs tracking-widest text-mocha-muted">LOADING FILES</div>
             ) : (
-              <FileList files={files} selectedIds={selectedIds} onToggleSelect={onToggleSelect} actions={actions} />
-            )}
-            {files.length === 0 && !filesLoading && !filesError && (
+              <div className="folder-enter flex min-h-0 flex-1 flex-col">
+                {filesView === "grid" ? (
+                  <FileGrid files={files} selectedIds={selectedIds} onToggleSelect={onToggleSelect} actions={actions} />
+                ) : (
+                  <FileList files={files} selectedIds={selectedIds} onToggleSelect={onToggleSelect} actions={actions} />
+                )}
+                {files.length === 0 && !filesError && (
               <div className="flex flex-1 flex-col items-center justify-center px-6 py-10 text-center">
                 {query ? (
                   <>
@@ -72,16 +76,15 @@ export function FilesTab({ crumbs, onNavigate, filesView, folders, onRenameFolde
                 )}
               </div>
             )}
-            {filesLoading && (
-              <div className="flex flex-1 items-center justify-center px-6 py-10 text-center font-mono text-xs tracking-widest text-mocha-muted">LOADING FILES</div>
-            )}
-            {filesError && (
-              <div className="mx-4 mb-4 rounded-2xl border border-red-400/20 bg-red-400/10 px-4 py-3 font-mono text-xs text-red-200">{filesError}</div>
-            )}
-            {hasMore && (
-              <button onClick={onLoadMore} disabled={loadingMore} className="glass-button btn-ghost mx-4 mb-4 rounded-full px-4 py-2 font-mono text-[11px] disabled:opacity-50">
-                {loadingMore ? "Loading" : "Load more"}
-              </button>
+                {filesError && (
+                  <div className="mx-4 mb-4 rounded-2xl border border-red-400/20 bg-red-400/10 px-4 py-3 font-mono text-xs text-red-200">{filesError}</div>
+                )}
+                {hasMore && (
+                  <button onClick={onLoadMore} disabled={loadingMore} className="glass-button btn-ghost mx-4 mb-4 rounded-full px-4 py-2 font-mono text-[11px] disabled:opacity-50">
+                    {loadingMore ? "Loading" : "Load more"}
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>

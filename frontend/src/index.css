@@ -203,6 +203,23 @@ body,
     opacity: 1;
     filter: blur(0);
   }
+  .folder-enter {
+    will-change: transform, opacity;
+    animation: folder-enter 480ms var(--spring-smooth) both;
+  }
+  .file-row-in {
+    will-change: transform, opacity;
+    animation: file-row-in 420ms var(--ease-fluid) both;
+  }
+  @keyframes folder-enter {
+    from { opacity: 0; transform: translateY(14px); filter: blur(6px); }
+    60% { opacity: 1; filter: blur(0); }
+    to { opacity: 1; transform: translateY(0); filter: blur(0); }
+  }
+  @keyframes file-row-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
   .preview-overlay {
     opacity: 0;
     will-change: opacity;
@@ -227,14 +244,6 @@ body,
   .preview-media-swap {
     will-change: transform, opacity;
     animation: preview-media-swap-in 480ms var(--spring-smooth) both;
-  }
-  .overlay-fade {
-    animation: mocha-fade-in 280ms var(--ease-fluid) both;
-  }
-  .modal-pop {
-    transform-origin: 50% 50%;
-    will-change: transform, opacity;
-    animation: modal-pop-in 420ms var(--spring-smooth) both;
   }
   .win-btn {
     transition: background-color 220ms var(--ease-fluid), color 220ms var(--ease-fluid), transform 180ms var(--ease-fluid);
@@ -318,12 +327,6 @@ body,
   to { opacity: 1; }
 }
 
-@keyframes modal-pop-in {
-  from { opacity: 0; transform: translateY(16px) scale(0.96); filter: blur(8px); }
-  60% { opacity: 1; filter: blur(0); }
-  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-}
-
 .menu-pop {
   transform-origin: 50% 0;
   will-change: transform, opacity;
@@ -376,10 +379,10 @@ body,
 
 @media (prefers-reduced-motion: reduce) {
   [class*="preview-"],
-  .overlay-fade,
-  .modal-pop,
   .menu-pop,
   .menu-item,
+  .folder-enter,
+  .file-row-in,
   .loader-float,
   .loader-steam,
   .loader-breathe {

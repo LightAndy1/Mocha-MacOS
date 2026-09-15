@@ -10,11 +10,11 @@ export function FileGrid({ files, selectedIds, onToggleSelect, actions }: {
 }) {
   return (
     <div className="grid gap-3 p-1 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
-      {files.map((f) => {
+      {files.map((f, i) => {
         const previewable = isPreviewable(f);
         const selected = selectedIds.has(f.id);
         return (
-          <div key={f.id} className={`group relative overflow-hidden rounded-2xl border transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] hover:border-mocha-gold/30 ${selected ? "border-mocha-gold/60 bg-mocha-gold/[0.06]" : "border-white/5 bg-white/[0.02]"}`}>
+          <div key={f.id} style={{ animationDelay: `${Math.min(i, 12) * 30}ms` }} className={`file-row-in group relative overflow-hidden rounded-2xl border transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] hover:border-mocha-gold/30 ${selected ? "border-mocha-gold/60 bg-mocha-gold/[0.06]" : "border-white/5 bg-white/[0.02]"}`}>
             <input
               type="checkbox"
               checked={selected}
