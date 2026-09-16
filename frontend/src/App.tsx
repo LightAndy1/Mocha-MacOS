@@ -1,6 +1,6 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { EventsOff, EventsOn } from "../wailsjs/runtime/runtime";
-import { api, copyText, folderName, formatBytes, formatDate, formatSpeed, formatTime, isMac, isPreviewable, parseLines, type AppSettings, type ArchiveEntry, type FileItem, type Profile, type RemoveSyncPreview, type RemoveSyncResult, type Share, type Status, type StorageInfo, type SyncFolder, type TransferProgress, type TrashItem } from "./lib";
+import { api, copyText, folderName, formatBytes, formatDate, formatSpeed, formatTime, isPreviewable, parseLines, type AppSettings, type ArchiveEntry, type FileItem, type Profile, type RemoveSyncPreview, type RemoveSyncResult, type Share, type Status, type StorageInfo, type SyncFolder, type TransferProgress, type TrashItem } from "./lib";
 import { useRevealRoot } from "./hooks";
 import { Loader } from "./Loader";
 import { Titlebar } from "./Titlebar";
@@ -22,10 +22,6 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("files");
   const [view, setView] = useState<"full" | "flyout">("full");
   const [menuOpen, setMenuOpen] = useState(false);
-
-  // ponytail: mac-only drag handles; Win/Linux keep custom Titlebar behavior
-  const macDrag = isMac() ? "titlebar-drag" : "";
-  const macNoDrag = isMac() ? "titlebar-no-drag" : "";
 
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
@@ -697,14 +693,14 @@ export default function App() {
       <Titlebar />
 
       <header className="fixed left-1/2 top-[52px] z-30 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2">
-        <div className={`flex items-center gap-1 rounded-full border border-white/10 bg-black/60 py-1 pl-4 pr-1 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur-3xl ${macDrag}`}>
+        <div className={`flex items-center gap-1 rounded-full border border-white/10 bg-black/60 py-1 pl-4 pr-1 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur-3xl`}>
           <span className="mr-2 font-serif text-base italic text-mocha-goldbright">Mocha</span>
           {(["files", "shares", "sync", "activity", "trash"] as Tab[]).map((t) => (
-            <button key={t} onClick={() => { setTab(t); closeMenu(); }} className={`glass-button rounded-full px-3 py-1.5 text-[11px] font-medium capitalize tracking-wide transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${tab === t ? "bg-white/10 text-mocha-goldbright" : "text-mocha-secondary hover:bg-white/5 hover:text-mocha-primary"} ${macNoDrag}`}>
+            <button key={t} onClick={() => { setTab(t); closeMenu(); }} className={`glass-button rounded-full px-3 py-1.5 text-[11px] font-medium capitalize tracking-wide transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${tab === t ? "bg-white/10 text-mocha-goldbright" : "text-mocha-secondary hover:bg-white/5 hover:text-mocha-primary"}`}>
               {t}
             </button>
           ))}
-          <button onClick={toggleMenu} aria-label="Menu" aria-expanded={menuOpen} className={`glass-button relative ml-1.5 flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-mocha-primary ${macNoDrag}`}>
+          <button onClick={toggleMenu} aria-label="Menu" aria-expanded={menuOpen} className={`glass-button relative ml-1.5 flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-mocha-primary`}>
             <span className={`absolute h-px w-4 bg-current transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${menuOpen ? "rotate-45" : "-translate-y-[3px]"}`} />
             <span className={`absolute h-px w-4 bg-current transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${menuOpen ? "-rotate-45" : "translate-y-[3px]"}`} />
           </button>
@@ -741,14 +737,14 @@ export default function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search files" className={`field w-40 rounded-full px-3.5 py-2 text-[13px] transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${macNoDrag}`} />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search files" className={`field w-40 rounded-full px-3.5 py-2 text-[13px] transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)]`} />
             {tab === "files" && (
               <>
                 <button
                   onClick={() => void changeFilesView(filesView === "grid" ? "list" : "grid")}
                   title={filesView === "grid" ? "List view" : "Grid view"}
                   aria-label="Toggle view"
-                  className={`glass-button btn-ghost flex h-8 w-8 items-center justify-center rounded-full ${macNoDrag}`}
+                  className={`glass-button btn-ghost flex h-8 w-8 items-center justify-center rounded-full`}
                 >
                   {filesView === "grid" ? (
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
@@ -763,13 +759,13 @@ export default function App() {
                     </svg>
                   )}
                 </button>
-                <button onClick={() => openModalFor({ kind: "mkdir" })} className={`glass-button btn-ghost rounded-full px-3.5 py-2 text-[13px] ${macNoDrag}`}>New Folder</button>
+                <button onClick={() => openModalFor({ kind: "mkdir" })} className={`glass-button btn-ghost rounded-full px-3.5 py-2 text-[13px]`}>New Folder</button>
                 {selectedIds.size > 0 && (
-                  <button onClick={() => void bulkDownload()} className={`glass-button btn-ghost rounded-full px-3.5 py-2 text-[13px] ${macNoDrag}`}>Zip ({selectedIds.size})</button>
+                  <button onClick={() => void bulkDownload()} className={`glass-button btn-ghost rounded-full px-3.5 py-2 text-[13px]`}>Zip ({selectedIds.size})</button>
                 )}
               </>
             )}
-            <button onClick={upload} disabled={uploading} className={`glass-button btn-gold group flex items-center gap-2 rounded-full py-1 pl-4 pr-1 text-[13px] font-semibold active:scale-[0.98] disabled:opacity-60 ${macNoDrag}`}>
+            <button onClick={upload} disabled={uploading} className={`glass-button btn-gold group flex items-center gap-2 rounded-full py-1 pl-4 pr-1 text-[13px] font-semibold active:scale-[0.98] disabled:opacity-60`}>
               {uploading ? "Uploading" : "Upload"}
               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-black/10 transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover:scale-110">
                 <ArrowIcon />
