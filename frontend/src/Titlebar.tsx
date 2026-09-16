@@ -19,16 +19,8 @@ function CloseIcon() {
 }
 
 export function Titlebar() {
-  // ponytail: visible grab handle; lights live in native chrome above webview,
-  // transparent bg keeps OS-rounded corners intact. Text clears lights via pl.
-  if (isMac()) {
-    return (
-      <div className="titlebar-drag fixed inset-x-0 top-0 z-40 flex h-9 select-none items-center gap-1.5 pl-20 pr-2.5">
-        <CoffeeMark className="h-3.5 w-3.5 text-[var(--accent-gold)]" />
-        <span className="text-[11px] font-semibold tracking-wide text-[var(--text-primary)]">Mocha</span>
-      </div>
-    );
-  }
+  // ponytail: native AppKit bar owns drag + zoom on mac, no web chrome needed
+  if (isMac()) return null;
   return (
     <div className="titlebar-drag fixed inset-x-0 top-0 z-40 flex h-9 select-none items-center justify-between border-b border-[var(--border-subtle)] bg-[var(--surface)] px-2.5">
       <div className="flex items-center gap-1.5 text-[var(--accent-gold)]">
