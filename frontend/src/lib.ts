@@ -294,7 +294,6 @@ export const api = {
   pickUpload: (remotePath: string) => invoke<string[]>("UploadPickedFiles", remotePath),
   download: (id: string, name: string) => invoke<string>("DownloadTo", id, name),
   previewUrl: (id: string) => invoke<PreviewURL>("GetPreviewURL", id),
-  previewNative: (id: string, name: string) => invoke<void>("PreviewNative", id, name),
   supportsContextMenu: () => invoke<boolean>("SupportsContextMenu"),
   syncFolders: () => invoke<SyncFolder[]>("GetSyncFolders"),
   addSyncFolder: () => invoke<SyncFolder>("AddSyncFolder"),

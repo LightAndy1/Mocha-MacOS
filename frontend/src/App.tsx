@@ -328,14 +328,6 @@ export default function App() {
   const previewableFiles = useMemo(() => files.filter((f) => isPreviewable(f)), [files]);
 
   const openPreview = useCallback(async (file: FileItem) => {
-    if (isMac()) {
-      try {
-        await api.previewNative(file.id, file.original_name);
-        return;
-      } catch {
-        // fall through to in-app overlay
-      }
-    }
     const req = ++previewReq.current;
     setPreviewFile(file);
     setPreviewUrl("");

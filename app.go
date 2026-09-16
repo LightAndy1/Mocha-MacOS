@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -495,44 +494,6 @@ func (a *App) GetPreviewURL(fileID string) (PreviewURL, error) {
 		return PreviewURL{}, err
 	}
 	return PreviewURL{URL: directURL}, nil
-}
-
-// PreviewNative downloads to temp and opens macOS Quick Look (Finder Spacebar UX).
-// ponytail: temp files kept for Quick Look, same path reused per file
-func (a *App) PreviewNative(fileID, fileName string) error {
-	if goruntime.GOOS != "darwin" {
-		return fmt.Errorf("native preview is macOS only")
-	}
-	if a.client == nil {
-		return fmt.Errorf("not connected")
-	}
-	fileID = strings.TrimSpace(fileID)
-	if fileID == "" {
-		return fmt.Errorf("file id required")
-	}
-	base := strings.TrimSpace(filepath.Base(fileName))
-	if base == "" || base == "." || base == "/" {
-		base = fileID
-	}
-	dir := filepath.Join(os.TempDir(), "mocha-preview")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	dest := filepath.Join(dir, fileID+"-"+base)
-	jobID := transfers.NewJobID("preview-")
-	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
-	defer cancel()
-	a.trackTransfer(jobID, cancel)
-	defer func() {
-		a.untrackTransfer(jobID)
-	}()
-	if err := transfers.DownloadFileWithID(ctx, a.client, fileID, dest, "inline", jobID, a.emit); err != nil {
-		return err
-	}
-	cmd := exec.Command("qlmanage", "-p", dest)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Start()
 }
 
 func (a *App) addSyncRoot(path string) (mosync.FolderState, error) {
