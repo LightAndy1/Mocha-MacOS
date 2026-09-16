@@ -18,7 +18,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:     "Mocha Desktop",
+		Title:     "Mocha",
 		Width:     1120,
 		Height:    720,
 		MinWidth:  960,
@@ -30,7 +30,7 @@ func main() {
 		BackgroundColour:  &options.RGBA{R: 12, G: 10, B: 9, A: 1},
 		HideWindowOnClose: true,
 		Mac: &mac.Options{
-			TitleBar:   mac.TitleBarHiddenInset(),
+			TitleBar:   mac.TitleBarDefault(),
 			Appearance: mac.NSAppearanceNameDarkAqua,
 			About: &mac.AboutInfo{
 				Title:   "Mocha Desktop",
