@@ -57,9 +57,7 @@ jobs:
           #   artifact-path: build/bin/*.exe
           - os: macos-latest
             artifact-name: mocha-desktop-macos
-            artifact-path: |
-              build/bin/Mocha.dmg
-              build/bin/Mocha.app.zip
+            artifact-path: build/bin/Mocha.dmg
           # - os: ubuntu-latest
           #   artifact-name: mocha-desktop-linux
           #   artifact-path: build/bin/mocha-desktop
@@ -98,7 +96,9 @@ jobs:
           mv build/bin/mocha-desktop.app "build/bin/Mocha.app"
       - name: package dmg (macos)
         if: runner.os == 'macOS'
-        run: bash build/darwin/package-dmg.sh "build/bin/Mocha.app"
+        run: |
+          python3 -m pip install dmgbuild
+          bash build/darwin/package-dmg.sh "build/bin/Mocha.app"
       - name: upload artifact
         uses: actions/upload-artifact@v5
         with:
