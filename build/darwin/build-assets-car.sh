@@ -12,7 +12,7 @@
 #
 # USAGE:
 #   1. wails build
-#   2. APP="build/bin/mocha-desktop.app" ./build/darwin/build-assets-car.sh
+#   2. APP="build/bin/Mocha.app" ./build/darwin/build-assets-car.sh
 #
 # ponytail: static fallback stays build/appicon.png; run this only for live glass.
 set -eu

@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"runtime"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -22,13 +23,14 @@ func main() {
 		Height:    720,
 		MinWidth:  960,
 		MinHeight: 640,
-		Frameless: true,
+		Frameless: runtime.GOOS != "darwin",
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
 		BackgroundColour:  &options.RGBA{R: 12, G: 10, B: 9, A: 1},
 		HideWindowOnClose: true,
 		Mac: &mac.Options{
+			TitleBar:   mac.TitleBarHiddenInset(),
 			Appearance: mac.NSAppearanceNameDarkAqua,
 			About: &mac.AboutInfo{
 				Title:   "Mocha Desktop",

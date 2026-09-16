@@ -58,8 +58,8 @@ jobs:
           - os: macos-latest
             artifact-name: mocha-desktop-macos
             artifact-path: |
-              build/bin/mocha-desktop.dmg
-              build/bin/mocha-desktop.app.zip
+              build/bin/Mocha.dmg
+              build/bin/Mocha.app.zip
           # - os: ubuntu-latest
           #   artifact-name: mocha-desktop-linux
           #   artifact-path: build/bin/mocha-desktop
@@ -93,10 +93,12 @@ jobs:
         run: wails build -nsis
       - name: build (macos)
         if: runner.os == 'macOS'
-        run: wails build -platform darwin/universal
+        run: |
+          wails build -platform darwin/universal
+          mv build/bin/mocha-desktop.app "build/bin/Mocha.app"
       - name: package dmg (macos)
         if: runner.os == 'macOS'
-        run: bash build/darwin/package-dmg.sh build/bin/mocha-desktop.app
+        run: bash build/darwin/package-dmg.sh "build/bin/Mocha.app"
       - name: upload artifact
         uses: actions/upload-artifact@v5
         with:

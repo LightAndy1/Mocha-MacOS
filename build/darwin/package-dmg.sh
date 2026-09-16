@@ -4,13 +4,15 @@
 # Usage: bash build/darwin/package-dmg.sh [path/to/app.app]
 set -euo pipefail
 
-APP_PATH="${1:-build/bin/mocha-desktop.app}"
-BIN_NAME="$(basename "$APP_PATH" .app)"
+APP_PATH="${1:-build/bin/Mocha.app}"
+# Display name (bundle) differs from the binary Wails emits.
+BIN_NAME="${BIN_NAME:-mocha-desktop}"
+APP_NAME="$(basename "$APP_PATH" .app)"
 BIN_DIR="$(dirname "$APP_PATH")"
 BIN_PATH="$APP_PATH/Contents/MacOS/$BIN_NAME"
-ZIP_PATH="$BIN_DIR/$BIN_NAME.app.zip"
-DMG_PATH="$BIN_DIR/$BIN_NAME.dmg"
-VOLUME_NAME="Mocha Desktop"
+ZIP_PATH="$BIN_DIR/$APP_NAME.app.zip"
+DMG_PATH="$BIN_DIR/$APP_NAME.dmg"
+VOLUME_NAME="Mocha"
 
 if [ ! -d "$APP_PATH" ]; then
   echo "error: .app not found at $APP_PATH (run 'wails build' first)" >&2
