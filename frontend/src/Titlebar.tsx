@@ -19,7 +19,10 @@ function CloseIcon() {
 }
 
 export function Titlebar() {
-  if (isMac()) return null;
+  // ponytail: native transparent toolbar has no usable grab area on its own;
+  // restore explicit Wails drag handle. No z-index so content paints above it.
+  // Traffic lights stay clickable, they live in native chrome above webview.
+  if (isMac()) return <div className="titlebar-drag fixed inset-x-0 top-0 h-14 select-none" aria-hidden="true" />;
   return (
     <div className="titlebar-drag fixed inset-x-0 top-0 z-40 flex h-9 select-none items-center justify-between border-b border-[var(--border-subtle)] bg-[var(--surface)] px-2.5">
       <div className="flex items-center gap-1.5 text-[var(--accent-gold)]">
