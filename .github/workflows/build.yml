@@ -97,7 +97,7 @@ jobs:
       - name: package dmg (macos)
         if: runner.os == 'macOS'
         run: |
-          python3 -m pip install dmgbuild
+          python3 -m pip install --break-system-packages dmgbuild
           bash build/darwin/package-dmg.sh "build/bin/Mocha.app"
       - name: upload artifact
         uses: actions/upload-artifact@v5
