@@ -643,7 +643,7 @@ export default function App() {
     return (
       <div className="bg-[var(--background)]">
         <Titlebar />
-        <div className={isMac() ? "" : "pt-9"}>
+        <div className="pt-9">
           <Loader />
         </div>
       </div>
@@ -696,7 +696,7 @@ export default function App() {
     <div className="flex h-[100dvh] flex-col overflow-hidden bg-[var(--background)] px-4 pb-4 text-mocha-primary">
       <Titlebar />
 
-      <header className={`fixed left-1/2 z-30 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 ${isMac() ? "top-3" : "top-[52px]"}`}>
+      <header className="fixed left-1/2 top-[52px] z-30 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2">
         <div className={`flex items-center gap-1 rounded-full border border-white/10 bg-black/60 py-1 pl-4 pr-1 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur-3xl ${macDrag}`}>
           <span className="mr-2 font-serif text-base italic text-mocha-goldbright">Mocha</span>
           {(["files", "shares", "sync", "activity", "trash"] as Tab[]).map((t) => (
