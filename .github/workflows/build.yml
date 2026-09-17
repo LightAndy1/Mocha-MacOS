@@ -51,16 +51,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # TEMP: macos-only while working on mac packaging — uncomment to restore all platforms
-          # - os: windows-latest
-          #   artifact-name: mocha-desktop-windows
-          #   artifact-path: build/bin/*.exe
+          - os: windows-latest
+            artifact-name: mocha-desktop-windows
+            artifact-path: build/bin/*.exe
           - os: macos-latest
             artifact-name: mocha-desktop-macos
             artifact-path: build/bin/Mocha.dmg
-          # - os: ubuntu-latest
-          #   artifact-name: mocha-desktop-linux
-          #   artifact-path: build/bin/mocha-desktop
+          - os: ubuntu-latest
+            artifact-name: mocha-desktop-linux
+            artifact-path: build/bin/mocha-desktop
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
